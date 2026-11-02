@@ -243,6 +243,11 @@ js/app.js           UI, clock, tools, recipes
   used. The demo scene is drawn procedurally at runtime.
 * **Your material**: images and videos you load stay in your browser. Nothing is uploaded anywhere.
 
+## License
+
+Public domain, under [the Unlicense](LICENSE). Do whatever you want with it: copy, change, sell or
+redistribute it, with or without credit. There is no warranty.
+
 ## Sources and references
 
 ### Historical processes
