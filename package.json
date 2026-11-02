@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "An unstable darkroom simulator for antiquated photographic processes.",
   "scripts": {
+    "start": "node tools/start.mjs",
     "demos": "node tools/render-demos.mjs"
   },
   "keywords": [],
