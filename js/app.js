@@ -66,10 +66,12 @@
   function slider(parent, label, p, min, max, step, o = {}, list = bindings) {
     const [get, set] = typeof p === 'string' ? path(p) : p;
     const r = row(parent, label, o.tip);
-    const inp = el('input', { type: 'range', min, max, step });
+    const lmin = o.log ? Math.log10(min) : min, lmax = o.log ? Math.log10(max) : max;
+    const inp = el('input', { type: 'range', min: lmin, max: lmax, step: o.log ? 'any' : step });
     const out = el('output');
     r.append(inp, out);
-    const toUI = (v) => (o.log ? Math.log10(v) : v), fromUI = (v) => (o.log ? Math.pow(10, v) : v);
+    const toUI = (v) => (o.log ? Math.log10(v) : v);
+    const fromUI = (v) => (o.log ? Math.min(max, Math.max(min, Math.round(Math.pow(10, v) / step) * step)) : v);
     const fmt = o.fmt || ((v) => (+v).toFixed(step < 1 ? (step < 0.1 ? 2 : 1) : 0));
     const refresh = () => { const v = get(); inp.value = toUI(v); out.textContent = fmt(v); };
     inp.addEventListener('input', () => { const v = fromUI(+inp.value); set(v); out.textContent = fmt(v); if (o.on) o.on(v); changed(o.kind || 'look'); });
