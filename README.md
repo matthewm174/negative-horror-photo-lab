@@ -89,6 +89,14 @@ it lands on the plate, with other layers ghosted on top), a **split** wipe compa
 at the original. The original is shown in its true colours as a reference only. *Save PNG* and *Use plate
 as layer* always use the plate.
 
+**Live re-process** (section 2, on by default) keeps each plate's history: exposures (including where you
+dodged and burned), light leaks, test strips, chemistry brush strokes, development time, flashes and fixing.
+When you change a setting that is normally applied once at exposure, development or fixing time, the plate
+is rebuilt from the same random seed with the new value. The effect shows within about a second, and
+setting the value back undoes the change. Settings changed while the lens is uncapped or the plate
+is in the tray apply only from that moment on. Turn Live re-process off for a strict one-shot darkroom.
+**Text size** in the header scales all text and controls, and is remembered between visits.
+
 1. **Load your picture.** Load a positive photo or a negative scan. The section also lists everything
    in the light path (the layers), and has *Add an object* and an *Adjust selected layer* panel.
    Every layer sits a set number of millimetres in front of the aperture. Each layer is blurred by its

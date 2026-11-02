@@ -71,9 +71,9 @@
     return { recipLoss: 1 - rf };
   }
 
-  function addLightLeak(sheet, proc, strength) {
+  function addLightLeak(sheet, proc, strength, leakSeed) {
     const W = sheet.W, H = sheet.H, L = Math.max(W, H);
-    const rnd = U.mulberry32((Math.random() * 1e9) | 0);
+    const rnd = U.mulberry32(leakSeed == null ? (Math.random() * 1e9) | 0 : leakSeed);
     const edge = (rnd() * 4) | 0, pos = rnd();
     const ex = edge === 0 ? 0 : edge === 1 ? W : pos * W;
     const ey = edge === 2 ? 0 : edge === 3 ? H : pos * H;
@@ -85,6 +85,7 @@
         sheet.latent[y * W + x] += strength * proc.H0 * 6 * Math.exp(-d / (0.12 + 0.12 * wob));
       }
     if (sheet.state === 'blank') sheet.state = 'exposed';
+    sheet.cache.dens = null;
   }
 
   function testStrip(sheet, st, proc, E, steps) {
@@ -100,6 +101,7 @@
       }
     }
     if (sheet.state === 'blank') sheet.state = 'exposed';
+    sheet.cache.dens = null;
   }
 
   // ---- development ----

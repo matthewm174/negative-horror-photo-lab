@@ -277,13 +277,16 @@
   }
 
   // ---- exposure session (interactive or instant) ----
-  function beginSession(st, proc, sheet) {
+  function beginSession(st, proc, sheet, seed, T) {
     const W = sheet.W, H = sheet.H;
     const prepared = prepareLayers(st, proc, W, H);
+    seed = seed == null ? (Math.random() * 1e9) | 0 : seed;
     return {
       W, H, prepared, raw: new Float32Array(W * H), E: new Float32Array(W * H),
-      T: st.exposure.time, elapsed: 0, rnd: U.mulberry32((Math.random() * 1e9) | 0),
+      T: T == null ? st.exposure.time : T, T0: T == null ? st.exposure.time : T, elapsed: 0, seed, rnd: U.mulberry32(seed),
       jit: prepared.map(() => [0, 0]), flick: 0,
+      // Time-integrated hand transmittance, so a replay can re-apply the same dodging and burning.
+      handAcc: null, freeTime: 0,
     };
   }
 
@@ -306,28 +309,40 @@
     sess.flick = sess.flick * 0.6 + U.gaussian(sess.rnd) * st.lamp.flicker * 0.5;
     const I = st.lamp.intensity * Math.max(0, 1 + sess.flick);
     irradiance(st, sess.prepared, W, H, tf, sess.jit, I, sess.E);
-    if (hand && hand.active) applyHand(sess.E, W, H, hand);
     const raw = sess.raw, E = sess.E;
+    if (hand && hand.active) {
+      const h = handFactor(W, H, hand);
+      if (!sess.handAcc) sess.handAcc = new Float32Array(W * H);
+      for (let i = 0; i < raw.length; i++) { E[i] *= h[i]; sess.handAcc[i] += h[i] * dt; }
+    } else sess.freeTime += dt;
     for (let i = 0; i < raw.length; i++) raw[i] += E[i] * dt;
     sess.elapsed += dt;
     return sess.elapsed >= sess.T - 1e-9;
   }
 
   // Dodging hand (blocks a soft disc) or burning card (blocks all but a soft hole).
-  function applyHand(E, W, H, hand) {
+  function handFactor(W, H, hand) {
+    const out = new Float32Array(W * H);
     const r = hand.radius, soft = Math.max(1, hand.soft);
     for (let y = 0; y < H; y++)
       for (let x = 0; x < W; x++) {
         const d = Math.hypot(x - hand.x, y - hand.y);
         const disc = 1 - U.smoothstep(r - soft, r + soft, d);
-        const i = y * W + x;
-        if (hand.tool === 'dodge') E[i] *= 1 - 0.97 * disc * hand.strength;
-        else E[i] *= 0.02 + 0.98 * disc;
+        out[y * W + x] = hand.tool === 'dodge' ? 1 - 0.97 * disc * hand.strength : 0.02 + 0.98 * disc;
       }
+    return out;
   }
 
-  function runInstant(st, proc, sheet) {
-    const sess = beginSession(st, proc, sheet);
+  // Average hand transmittance over the session (null = the hand never touched the plate).
+  function handMask(sess) {
+    if (!sess.handAcc || sess.elapsed <= 0) return null;
+    const m = new Float32Array(sess.handAcc.length);
+    for (let i = 0; i < m.length; i++) m[i] = (sess.handAcc[i] + sess.freeTime) / sess.elapsed;
+    return m;
+  }
+
+  function runInstant(st, proc, sheet, seed, T) {
+    const sess = beginSession(st, proc, sheet, seed, T);
     const n = sessionMoving(st) ? 32 : 1;
     for (let k = 0; k < n; k++) stepSession(st, sess, sess.T / n, null);
     sess.elapsed = sess.T;
@@ -393,6 +408,6 @@
 
   Lab.optics = {
     LAYER_KINDS, makeImageLayer, makeProcLayer, procSize, prepareLayers, irradiance, projection,
-    beginSession, stepSession, runInstant, sessionMoving, originalView,
+    beginSession, stepSession, runInstant, sessionMoving, originalView, handMask,
   };
 })(window.Lab);

@@ -22,7 +22,7 @@
     tone: { toner: 'none', strength: 0.5 },
     age: { years: 0, sealed: false, env: 0.03 },
     tool: { name: 'dodge', radius: 50, soft: 30, strength: 0.8 },
-    view: 'plate', splitAt: 0.5,
+    view: 'plate', splitAt: 0.5, live: true,
     reel: { start: 0, duration: 3, fps: 18, width: 480, generations: 1, weave: 0.5, flicker: 0.4, scratches: 0.4, dust: 0.4, slip: 0.2, exhaustion: 0.3, stepPrint: 1, stockSeed: 1234 },
     layers: [], sel: null,
   };
@@ -116,15 +116,38 @@
   const refreshAll = () => bindings.forEach((f) => f());
 
   // ---------- change scheduling ----------
-  let lookTimer = 0, projTimer = 0;
+  // kind: 'look' = redraw only; 'optics' = light path changed; 'process' = a setting that is baked in when
+  // the plate is exposed, developed or fixed; 'none' = no visible effect on the current plate.
+  let lookTimer = 0, projTimer = 0, replayTimer = 0, replayPending = false;
   function changed(kind) {
     if (kind === 'none') return;
-    if (kind === 'optics' && st.view === 'projection') { clearTimeout(projTimer); projTimer = setTimeout(drawProjection, 120); return; }
+    if (kind === 'optics' && st.view === 'projection') { clearTimeout(projTimer); projTimer = setTimeout(drawProjection, 120); }
+    if (kind === 'process' && sheet) sheet.cache.dens = null;
+    if ((kind === 'optics' || kind === 'process') && st.live && mode === 'idle' && sheet && sheet.ops.length) {
+      replayPending = true;
+      clearTimeout(replayTimer);
+      replayTimer = setTimeout(runReplay, 250);
+      return;
+    }
+    if (kind === 'optics' && st.view === 'projection') return;
     if (mode === 'exposing') return;
     if (mode === 'developing' && st.view === 'plate') return;
     clearTimeout(lookTimer);
     lookTimer = setTimeout(draw, 90);
   }
+  function runReplay() {
+    if (!replayPending || mode !== 'idle' || !sheet) return;
+    $('#status').textContent = 'Re-processing the plate with your new settings…';
+    // Let the status paint before the (synchronous) replay blocks the page.
+    setTimeout(() => {
+      if (!replayPending || mode !== 'idle') return;
+      replayPending = false;
+      replaySheet();
+      draw();
+      updateActions();
+    }, 20);
+  }
+  function cancelReplay() { replayPending = false; clearTimeout(replayTimer); }
 
   // ---------- sheet & drawing ----------
   function sheetDims() {
@@ -133,7 +156,9 @@
   }
   function newSheet(msg) {
     const [W, H] = sheetDims();
+    cancelReplay();
     sheet = E.newSheet(W, H);
+    sheet.ops = [];
     sess = null; mode = 'idle';
     for (const c of [canvas, overlay]) { c.width = W; c.height = H; }
     if (msg !== false) log(`Fresh ${P[st.processId].name} plate, ${W}×${H}.`);
@@ -185,6 +210,7 @@
   }
   // Always the real plate, regardless of the comparison view on screen.
   function plateCanvas() {
+    flushReplay();
     const c = el('canvas', { width: sheet.W, height: sheet.H });
     const g = c.getContext('2d');
     g.putImageData(new ImageData(plateRGBA(), sheet.W, sheet.H), 0, 0);
@@ -217,6 +243,7 @@
   // ---------- exposure ----------
   function startExposure() {
     if (mode !== 'idle') return;
+    flushReplay();
     if (sheet.state !== 'blank' && sheet.state !== 'exposed') return log('This plate has already been in the developer. Start a fresh plate.');
     sess = O.beginSession(st, proc(), sheet);
     mode = 'exposing';
@@ -225,6 +252,7 @@
   }
   function finishExposure() {
     const p = proc();
+    sheet.ops.push({ t: 'expose', seed: sess.seed, frac: sess.T0 > 0 ? sess.elapsed / sess.T0 : 1, mask: O.handMask(sess) });
     const r = E.commitSession(sheet, sess, st, p);
     lastRecip = r.recipLoss;
     log(`Exposure done: ${fmtTime(sess.elapsed)}${r.recipLoss > 0.01 ? `, reciprocity failure ate ${(r.recipLoss * 100).toFixed(0)}% of the light` : ''}.${p.dev.mode === 'printout' ? ' The image printed out as you watched.' : p.dev.mode === 'none' ? '' : ' The latent image is invisible until developed.'}`);
@@ -233,6 +261,7 @@
   }
   function instantExposure() {
     if (mode !== 'idle') return;
+    flushReplay();
     if (sheet.state !== 'blank' && sheet.state !== 'exposed') return log('This plate has already been developed. Start a fresh plate.');
     sess = O.runInstant(st, proc(), sheet);
     finishExposure();
@@ -246,45 +275,97 @@
   function intoTray() {
     if (mode !== 'idle' || !canDevelop()) return;
     if (sheet.fullD) return log('Already developed — fix it or start a fresh plate.');
+    flushReplay();
     E.startDevelop(sheet, st, proc());
+    sheet.ops.push({ t: 'develop', instant: false, time: 0, events: [] });
     mode = 'developing';
     log(`Into the ${proc().dev.label.toLowerCase()}. Watch the image come up and pull it when it looks right.`);
     updateActions();
   }
+  const devOp = () => { const op = sheet.ops[sheet.ops.length - 1]; return op && op.t === 'develop' ? op : null; };
   function pull() {
     if (mode !== 'developing') return;
     mode = 'idle'; sheet.state = 'developed';
+    if (devOp()) devOp().time = sheet.devTime;
     log(`Pulled after ${fmtTime(sheet.devTime)} (recommended ≈ ${fmtTime(st.dev.time)}).`);
     draw(); updateActions();
   }
   function instantDevelop() {
     if (mode !== 'idle' || !canDevelop() || sheet.fullD) return;
+    flushReplay();
     const p = proc();
     E.startDevelop(sheet, st, p);
     const n = 40;
     for (let k = 0; k < n; k++) E.devStep(sheet, st, p, st.dev.time / n);
     sheet.state = 'developed';
+    sheet.ops.push({ t: 'develop', instant: true, events: [] });
     log(`Developed for ${fmtTime(st.dev.time)} at ${st.dev.temp}°C, agitation ${st.dev.agitation}.`);
     draw(); updateActions();
   }
   function doFlash() {
     if (mode !== 'developing' || proc().dev.mode !== 'liquid') return;
     E.flash(sheet, st, proc(), st.flash.strength);
+    if (devOp()) devOp().events.push({ t: 'flash', at: sheet.devTime });
     log('Flashed the room light mid-development (Sabattier). Tones begin to reverse; Mackie lines form at the edges.');
+  }
+  function applyFix(s, p) {
+    s.fixQ = p.fixRef > 0 ? U.clamp(st.fix.time / p.fixRef, 0, 1) : 1;
+    s.washQ = p.washRef > 0 ? U.clamp(st.wash.time / p.washRef, 0, 1) : 1;
+    s.state = 'fixed';
   }
   function fixAndWash() {
     if (mode === 'developing') pull();
     if (mode !== 'idle') return;
+    flushReplay();
     const p = proc();
-    sheet.fixQ = p.fixRef > 0 ? U.clamp(st.fix.time / p.fixRef, 0, 1) : 1;
-    sheet.washQ = p.washRef > 0 ? U.clamp(st.wash.time / p.washRef, 0, 1) : 1;
-    sheet.state = 'fixed';
+    applyFix(sheet, p);
+    sheet.ops.push({ t: 'fix' });
     if (!sheet.fullD && canDevelop()) log('Fixed without developing: the latent image is dissolved away. A blank, haunted plate.');
     log(`Fixed ${fmtTime(st.fix.time)} (${(sheet.fixQ * 100).toFixed(0)}% complete), washed ${fmtTime(st.wash.time)} (${(sheet.washQ * 100).toFixed(0)}%).${sheet.fixQ < 0.9 ? ' Residual silver salts will darken and stain with age.' : ''}`);
     draw(); updateActions();
   }
 
-  // ---------- main clock ----------
+  // ---------- live re-process ----------
+  // Every plate keeps a list of what was done to it. When a baked-in setting changes, the plate is rebuilt
+  // from the same seed by replaying that list with the current settings, so the change is visible at once.
+  function applyOp(s, op, p) {
+    if (op.t === 'expose') {
+      const ss = O.runInstant(st, p, s, op.seed, st.exposure.time * op.frac);
+      if (op.mask) for (let i = 0; i < ss.raw.length; i++) ss.raw[i] *= op.mask[i];
+      lastRecip = E.commitSession(s, ss, st, p).recipLoss;
+    } else if (op.t === 'leak') E.addLightLeak(s, p, op.strength, op.seed);
+    else if (op.t === 'strip') E.testStrip(s, st, p, O.projection(st, p, s.W, s.H), 6);
+    else if (op.t === 'brush') E.chemBrush(s, op.x, op.y, op.tool, op.radius, op.strength);
+    else if (op.t === 'develop') {
+      const total = op.instant ? st.dev.time : op.time;
+      const step = total / 40;
+      E.startDevelop(s, st, p);
+      const stepTo = (T) => { while (s.devTime < T - 1e-9) E.devStep(s, st, p, Math.min(step, T - s.devTime)); };
+      for (const ev of op.events) {
+        stepTo(Math.min(ev.at, total));
+        if (ev.t === 'flash') E.flash(s, st, p, st.flash.strength);
+        else E.chemBrush(s, ev.x, ev.y, ev.tool, ev.radius, ev.strength);
+      }
+      stepTo(total);
+      s.state = 'developed';
+    } else if (op.t === 'fix') applyFix(s, p);
+  }
+  function replaySheet() {
+    const old = sheet, p = proc();
+    const s = E.newSheet(old.W, old.H, old.seed);
+    s.ops = old.ops; s.cracks = old.cracks;
+    // Noise fields depend only on the seed and their own settings keys, so they can be reused.
+    for (const k of ['sens', 'fib', 'defects', 'age']) if (old.cache[k]) s.cache[k] = old.cache[k];
+    lastRecip = 0;
+    for (const op of s.ops) applyOp(s, op, p);
+    sheet = s;
+  }
+  // Bring the plate up to date before anything new is done to it.
+  function flushReplay() {
+    if (!replayPending) return;
+    cancelReplay();
+    if (mode === 'idle' && sheet && sheet.ops.length) replaySheet();
+  }
   let last = performance.now(), acc = 0, renderAcc = 0;
   function loop(now) {
     const dt = Math.min(0.1, (now - last) / 1000);
@@ -331,7 +412,11 @@
     if (t === 'dodge' || t === 'burn') { hand.active = mode === 'exposing'; return; }
     if (['developer', 'fixer', 'water', 'thumb'].includes(t)) {
       if (sheet.state === 'fixed') return;
+      flushReplay();
       E.chemBrush(sheet, x, y, t, st.tool.radius, st.tool.strength);
+      const op = { t: 'brush', x, y, tool: t, radius: st.tool.radius, strength: st.tool.strength };
+      if (mode === 'developing' && devOp()) devOp().events.push(Object.assign(op, { at: sheet.devTime }));
+      else sheet.ops.push(op);
       if (mode !== 'developing') changed('look');
       return;
     }
@@ -599,7 +684,8 @@
     select(s2, 'Process', 'processId', Object.keys(P).map((k) => [k, P[k].name]), { on: (v) => selectProcess(v) });
     s2.append(el('p', { className: 'blurb', id: 'procBlurb' }));
     select(s2, 'Plate size', [() => String(st.paperLong), (v) => { st.paperLong = +v; }], [['512', 'Quarter (512 px, fastest)'], ['768', 'Half (768 px)'], ['1024', 'Whole (1024 px)'], ['1536', 'Mammoth (1536 px, slow)']], { on: () => newSheet(), kind: 'none' });
-    slider(s2, 'Contrast grade', 'grade', 0.4, 2.5, 0.05, { tip: 'Multiplies the emulsion gamma (like paper grades 0–5). Applies to the next development.' });
+    slider(s2, 'Contrast grade', 'grade', 0.4, 2.5, 0.05, { kind: 'process', tip: 'Multiplies the emulsion gamma (like paper grades 0–5)' });
+    check(s2, 'Live re-process', 'live', { kind: 'process', tip: 'When on, changing an exposure, plate, development or fixing setting re-runs what you did to this plate with the new setting, so you see the effect straight away. Turn off for the strict one-shot darkroom.' });
     const b2 = el('div', { className: 'btns' });
     button(b2, 'Fresh plate', () => newSheet(), 'primary', 'Replace the plate with a new, unexposed one (your setup stays)');
     s2.append(b2, el('p', { className: 'hint', textContent: 'Then use the buttons under the plate. Sections 3–5 are optional fine-tuning.' }));
@@ -611,9 +697,9 @@
     slider(s3, 'Lamp height', 'lamp.height', 0.3, 4, 0.01, { kind: 'optics', tip: 'Closer lamp = harsher falloff' });
     slider(s3, 'Lamp size', 'lamp.size', 0, 2, 0.01, { kind: 'optics', tip: 'Diffuse sources soften out-of-focus layers (penumbra)' });
     slider(s3, 'Condenser', 'lamp.condenser', 0, 1, 0.01, { kind: 'optics', tip: 'Callier effect: specular light raises negative contrast (Q up to ~1.45)' });
-    slider(s3, 'Flicker', 'lamp.flicker', 0, 1, 0.01, { kind: 'none', tip: 'Gas lamp / candle instability during exposure' });
-    slider(s3, 'Travel X', 'lamp.travelX', -3, 3, 0.01, { kind: 'none', tip: 'Lamp (or sun) moves across during the exposure' });
-    slider(s3, 'Travel Y', 'lamp.travelY', -3, 3, 0.01, { kind: 'none' });
+    slider(s3, 'Flicker', 'lamp.flicker', 0, 1, 0.01, { kind: 'process', tip: 'Gas lamp / candle instability during exposure' });
+    slider(s3, 'Travel X', 'lamp.travelX', -3, 3, 0.01, { kind: 'process', tip: 'Lamp (or sun) moves across during the exposure' });
+    slider(s3, 'Travel Y', 'lamp.travelY', -3, 3, 0.01, { kind: 'process' });
 
     const s4 = section(left, '4 · Aperture & lens (optional)', false);
     select(s4, 'Aperture', 'aperture.shape', [['round', 'Round iris'], ['pinhole', 'Pinhole'], ['hslit', 'Horizontal slit'], ['vslit', 'Vertical slit']], { kind: 'optics' });
@@ -621,7 +707,7 @@
     slider(s4, 'Focus at (mm)', 'aperture.focus', 0, 300, 1, { kind: 'optics' });
     slider(s4, 'Pinhole size', 'aperture.pinhole', 0.2, 4, 0.01, { kind: 'optics', tip: '1 = Rayleigh optimum; smaller diffracts, larger blurs' });
     slider(s4, 'Lens softness', 'aperture.softness', 0, 3, 0.01, { kind: 'optics', tip: 'Spherical aberration / dirty lens' });
-    slider(s4, 'Field curvature', 'aperture.fieldCurve', 0, 2, 0.01, { kind: 'none', tip: 'Petzval-era lenses: sharp centre, smeared corners' });
+    slider(s4, 'Field curvature', 'aperture.fieldCurve', 0, 2, 0.01, { kind: 'process', tip: 'Petzval-era lenses: sharp centre, smeared corners' });
     slider(s4, 'Camera vignette', 'aperture.camVignette', 0, 1, 0.01, { kind: 'optics', tip: 'Dark corners: the cos⁴ falloff of the camera that took the original picture' });
     slider(s4, 'Enlarger falloff', 'aperture.vignette', 0, 1, 0.01, { kind: 'optics', tip: 'cos⁴ falloff of the printing lens: less light at the corners (lighter corners on negative-working plates, darker on positive plates)' });
     check(s4, 'Invert image', 'aperture.invert', { kind: 'optics', tip: 'A real lens or pinhole turns the image upside down' });
@@ -629,10 +715,10 @@
     const s5 = section(left, '5 · Plate flaws & grain (optional)', false);
     slider(s5, 'Graininess', 'grain.amount', 0, 1, 0.01, { tip: 'Coverage per grain in the stochastic (Boolean) grain model' });
     slider(s5, 'Grain size', 'grain.size', 1, 6, 0.1, { tip: 'Clump size of the developed silver (px)' });
-    slider(s5, 'Coating uneven', 'plate.coat', 0, 1, 0.01, { kind: 'none', tip: 'Thickness variations of the hand-coated emulsion (applies to next exposure)' });
-    slider(s5, 'Pour pooling', 'plate.pool', 0, 1, 0.01, { kind: 'none', tip: 'Emulsion pooling toward the drain corner, with streaks (next exposure)' });
-    slider(s5, 'Thumb corner', 'plate.thumb', 0, 1, 0.01, { kind: 'none', tip: 'Uncoated corner where the plate was held while pouring (next exposure)' });
-    slider(s5, 'Dust on plate', 'plate.dust', 0, 1, 0.01, { kind: 'none', tip: 'Specks sitting on the emulsion during exposure — they print sharp (next exposure)' });
+    slider(s5, 'Coating uneven', 'plate.coat', 0, 1, 0.01, { kind: 'process', tip: 'Thickness variations of the hand-coated emulsion' });
+    slider(s5, 'Pour pooling', 'plate.pool', 0, 1, 0.01, { kind: 'process', tip: 'Emulsion pooling toward the drain corner, with streaks' });
+    slider(s5, 'Thumb corner', 'plate.thumb', 0, 1, 0.01, { kind: 'process', tip: 'Uncoated corner where the plate was held while pouring' });
+    slider(s5, 'Dust on plate', 'plate.dust', 0, 1, 0.01, { kind: 'process', tip: 'Specks sitting on the emulsion during exposure — they print sharp' });
     slider(s5, 'Paper fibres', 'plate.fibers', 0, 1, 0.01, { tip: 'Fibre texture printing through (calotype, salt paper)' });
     slider(s5, 'Comets', 'plate.comets', 0, 1, 0.01, { tip: 'Collodion comets: dirt specks the silver flowed around' });
     slider(s5, 'Oyster shell', 'plate.oyster', 0, 1, 0.01, { tip: 'Drying lines near the corner of a poured plate' });
@@ -644,14 +730,23 @@
     const right = $('#right');
     const s5 = section(right, '6 · Expose');
     s5.append(el('p', { className: 'hint', textContent: 'Press "Uncap lens (expose)" under the plate. Too dark or too pale? Change Exposure time, or make a Test strip first.' }));
-    slider(s5, 'Exposure time', 'exposure.time', 0.01, 300000, 0.01, { kind: 'none', log: true, fmt: fmtTime });
+    slider(s5, 'Exposure time', 'exposure.time', 0.01, 300000, 0.01, { kind: 'process', log: true, fmt: fmtTime });
     slider(s5, 'Darkroom clock', 'exposure.clock', 0.05, 7200, 0.01, { kind: 'none', log: true, fmt: (v) => '×' + (v < 10 ? v.toFixed(2) : v.toFixed(0)), tip: 'Simulated seconds per real second during interactive exposure' });
-    slider(s5, 'Halation', 'exposure.halation', 0, 1, 0.01, { kind: 'none', tip: 'Glow from light reflected off the back of the support' });
+    slider(s5, 'Halation', 'exposure.halation', 0, 1, 0.01, { kind: 'process', tip: 'Glow from light reflected off the back of the support' });
     const b5 = el('div', { className: 'btns' });
-    button(b5, 'Light leak', () => { if (sheet.state === 'blank' || sheet.state === 'exposed') { E.addLightLeak(sheet, proc(), 0.3 + Math.random() * 0.7); log('A crack of light got into the holder.'); draw(); } }, '', 'An accident: light reaches the plate from an edge');
+    button(b5, 'Light leak', () => {
+      if (sheet.state !== 'blank' && sheet.state !== 'exposed') return;
+      flushReplay();
+      const strength = 0.3 + Math.random() * 0.7, seed = (Math.random() * 1e9) | 0;
+      E.addLightLeak(sheet, proc(), strength, seed);
+      sheet.ops.push({ t: 'leak', strength, seed });
+      log('A crack of light got into the holder.'); draw(); updateActions();
+    }, '', 'An accident: light reaches the plate from an edge');
     button(b5, 'Test strip', () => {
       if (sheet.state !== 'blank' && sheet.state !== 'exposed') return;
+      flushReplay();
       E.testStrip(sheet, st, proc(), O.projection(st, proc(), sheet.W, sheet.H), 6);
+      sheet.ops.push({ t: 'strip' });
       log(`Test strip: six bands from ${fmtTime(st.exposure.time / 8)} to ${fmtTime(st.exposure.time * 4)} (doubling).`);
       draw(); updateActions();
     }, '', 'Six strips, each a stop apart, centred on the current time');
@@ -659,18 +754,18 @@
 
     const s6 = section(right, '7 · Develop & fix');
     s6.append(el('p', { className: 'hint', id: 'devLabel' }));
-    s6.append(el('p', { className: 'hint', textContent: 'Press "Into the tray", watch, press "Pull", then "Fix & wash". The sliders below change how the chemistry behaves.' }));
-    slider(s6, 'Temperature °C', 'dev.temp', 5, 90, 0.5, { kind: 'none', tip: 'Rate roughly doubles every 10 °C (Q10≈2). Warm baths frill gelatin.' });
-    slider(s6, 'Recommended', 'dev.time', 5, 1200, 1, { kind: 'none', fmt: fmtTime, tip: 'Used by Instant develop and the reel' });
+    s6.append(el('p', { className: 'hint', textContent: 'Press "Into the tray", watch, press "Pull", then "Fix & wash". The sliders below change how the chemistry behaves; with Live re-process on, a finished plate is re-developed as you move them.' }));
+    slider(s6, 'Temperature °C', 'dev.temp', 5, 90, 0.5, { kind: 'process', tip: 'Rate roughly doubles every 10 °C (Q10≈2). Warm baths frill gelatin.' });
+    slider(s6, 'Recommended', 'dev.time', 5, 1200, 1, { kind: 'process', fmt: fmtTime, tip: 'Used by Instant develop and the reel' });
     slider(s6, 'Tray clock', 'dev.clock', 1, 200, 1, { kind: 'none', fmt: (v) => '×' + v });
-    select(s6, 'Agitation', 'dev.agitation', [['none', 'Still bath'], ['gentle', 'Gentle rocking'], ['vigorous', 'Vigorous']], { kind: 'none' });
-    slider(s6, 'Uneven chemistry', 'dev.uneven', 0, 1, 0.01, { kind: 'none', tip: 'Local developer activity variation' });
-    slider(s6, 'Uneven pour', 'dev.pour', 0, 1, 0.01, { kind: 'none', tip: 'Developer reaches the far corner later' });
-    slider(s6, 'Bromide drag', 'dev.drag', 0, 1, 0.01, { kind: 'none', tip: 'Exhausted developer streams down from dense areas in a still bath' });
-    slider(s6, 'Flash strength', 'flash.strength', 0.05, 2, 0.01, { kind: 'none' });
-    slider(s6, 'Mackie lines', 'flash.mackie', 0, 1, 0.01, { kind: 'none' });
-    slider(s6, 'Fix time', 'fix.time', 0, 1800, 1, { kind: 'none', fmt: fmtTime });
-    slider(s6, 'Wash time', 'wash.time', 0, 3600, 1, { kind: 'none', fmt: fmtTime });
+    select(s6, 'Agitation', 'dev.agitation', [['none', 'Still bath'], ['gentle', 'Gentle rocking'], ['vigorous', 'Vigorous']], { kind: 'process' });
+    slider(s6, 'Uneven chemistry', 'dev.uneven', 0, 1, 0.01, { kind: 'process', tip: 'Local developer activity variation' });
+    slider(s6, 'Uneven pour', 'dev.pour', 0, 1, 0.01, { kind: 'process', tip: 'Developer reaches the far corner later' });
+    slider(s6, 'Bromide drag', 'dev.drag', 0, 1, 0.01, { kind: 'process', tip: 'Exhausted developer streams down from dense areas in a still bath' });
+    slider(s6, 'Flash strength', 'flash.strength', 0.05, 2, 0.01, { kind: 'process' });
+    slider(s6, 'Mackie lines', 'flash.mackie', 0, 1, 0.01, { kind: 'process' });
+    slider(s6, 'Fix time', 'fix.time', 0, 1800, 1, { kind: 'process', fmt: fmtTime });
+    slider(s6, 'Wash time', 'wash.time', 0, 3600, 1, { kind: 'process', fmt: fmtTime });
 
     const s7 = section(right, '8 · Tone, age & save');
     s7.append(el('p', { className: 'hint', textContent: 'After fixing: these sliders change the finished plate live. Then Save PNG.' }));
@@ -690,6 +785,7 @@
       const l = O.makeImageLayer(data, `Plate ${st.layers.length + 1}`);
       l.source = 'negative'; l.correct = false; l.reelSource = false;
       addLayer(l);
+      cancelReplay(); // the new layer is for the next plate, not this one
       log('The plate is now a transparency in the light path (raw transmittance, no polarity correction).');
     }, '', 'Contact-print / re-photograph this plate through the next one');
     button(b7, 'Save PNG', savePNG, 'primary');
@@ -905,6 +1001,12 @@
 
   // ---------- boot ----------
   function boot() {
+    const ts = $('#textSize');
+    const setSize = (v) => { document.documentElement.dataset.size = v; ts.value = v; try { localStorage.setItem('nhpl.textSize', v); } catch { /* storage unavailable */ } };
+    let saved = 'large';
+    try { saved = localStorage.getItem('nhpl.textSize') || saved; } catch { /* storage unavailable */ }
+    setSize(saved);
+    ts.addEventListener('change', () => setSize(ts.value));
     buildLeft(); buildRight(); buildToolbar(); buildActions();
     const rs = $('#recipe');
     for (const k in RECIPES) rs.append(el('option', { value: k, textContent: RECIPES[k].name }));
