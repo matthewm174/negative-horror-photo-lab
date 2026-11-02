@@ -1,5 +1,9 @@
 # Negative Horror Photo Lab
 
+> **AI disclaimer:** This project was written with the help of AI coding assistants. The code, the
+> documentation and the descriptions of historical processes and their physics may contain mistakes.
+> Check anything important against the sources listed at the end before relying on it.
+
 *An unstable darkroom for ghosts and hauntologists.*
 
 This is a darkroom simulator for antiquated, lo-fi photographic processes. It is not a filter. You place
