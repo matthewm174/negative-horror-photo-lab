@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Negative Horror Photo Lab</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header>
+    <h1>NEGATIVE HORROR PHOTO LAB</h1>
+    <p class="sub">an unstable darkroom for ghosts &amp; hauntologists — black, white and sepia only</p>
+    <div class="recipes">
+      <label>Starting recipe <select id="recipe"></select></label>
+      <button id="applyRecipe">Set up bench</button>
+    </div>
+  </header>
+
+  <main>
+    <aside id="left" class="panel"></aside>
+
+    <section id="easel">
+      <div id="toolbar"></div>
+      <div id="stage">
+        <canvas id="plate" width="640" height="800"></canvas>
+        <canvas id="overlay" width="640" height="800"></canvas>
+      </div>
+      <div id="status"></div>
+      <div id="nextStep"></div>
+      <div id="actions"></div>
+    </section>
+
+    <aside id="right" class="panel"></aside>
+  </main>
+
+  <script src="js/core.js"></script>
+  <script src="js/processes.js"></script>
+  <script src="js/optics.js"></script>
+  <script src="js/emulsion.js"></script>
+  <script src="js/artifacts.js"></script>
+  <script src="js/render.js"></script>
+  <script src="js/video.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
